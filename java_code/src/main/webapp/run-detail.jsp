@@ -92,7 +92,7 @@
         }).join('');
       }
       var REFRESH_INTERVAL_MS = 30000;
-      var FAST_REFRESH_INTERVAL_MS = 1000;  // until step 1 is completed
+      var FAST_REFRESH_INTERVAL_MS = 3000;  // until step 1 is completed
       var tick;
       var countdownTick;
       var nextRefreshAt = 0;
@@ -126,7 +126,7 @@
             if (!step1Completed(run)) intervalMs = FAST_REFRESH_INTERVAL_MS;
             nextRefreshAt = Date.now() + intervalMs;
             var secEl = document.getElementById('refreshIntervalSec');
-            if (secEl) secEl.textContent = intervalMs === FAST_REFRESH_INTERVAL_MS ? '1' : '30';
+            if (secEl) secEl.textContent = intervalMs === FAST_REFRESH_INTERVAL_MS ? '3' : '30';
             if (!tick) {
               var noteEl = document.getElementById('nextCheckNote');
               var logsNoteEl = document.getElementById('nextCheckLogs');
