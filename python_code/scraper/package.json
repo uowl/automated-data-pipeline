@@ -1,0 +1,14 @@
+{
+  "name": "automated-data-pipeline-scraper",
+  "version": "1.0.0",
+  "description": "HTTP API + Playwright for headless Chrome scraping (runs on Azure VM)",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "playwright": "^1.49.0"
+  }
+}

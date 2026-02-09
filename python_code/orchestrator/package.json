@@ -1,0 +1,16 @@
+{
+  "name": "automated-data-pipeline-orchestrator",
+  "version": "1.0.0",
+  "description": "Runs the 4-step pipeline (Data Pull, Extract, Transform, Migrate)",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "init-db": "node init-db.js",
+    "pipeline": "node index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "csv-parse": "^5.5.6"
+  }
+}

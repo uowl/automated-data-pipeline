@@ -1,0 +1,4 @@
+OrderId,CustomerId,Amount,OrderDate
+ORD-001,C1,25.50,2024-01-02
+ORD-002,C2,-1,2024-01-03
+ORD-003,C3,150,2024-01-04

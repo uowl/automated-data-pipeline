@@ -1,0 +1,107 @@
+<%@ page contentType="text/html;charset=UTF-8" language="java" %>
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Run detail</title>
+  <link rel="stylesheet" href="${pageContext.request.contextPath}/css/style.css">
+</head>
+<body class="max-w">
+  <header>
+    <nav>
+      <h1>Pipeline Monitor</h1>
+      <a href="${pageContext.request.contextPath}/">Runs</a>
+      <a href="${pageContext.request.contextPath}/manual-run.jsp">Manual Run</a>
+      <a href="${pageContext.request.contextPath}/schedules.jsp">Schedules</a>
+      <a href="${pageContext.request.contextPath}/logs.jsp">All logs</a>
+    </nav>
+    <p>Automated Data Pipeline — 4 steps: Data Pull, Extract, Transform, Migrate</p>
+  </header>
+
+  <p><a href="${pageContext.request.contextPath}/">Back to runs</a></p>
+  <div id="loading">Loading run…</div>
+  <div id="notFound" style="display: none;">Run not found. <a href="${pageContext.request.contextPath}/">Back to list</a></div>
+  <div id="content" style="display: none;">
+    <div style="margin-bottom: 1.5rem;">
+      <h2 id="runTitle" style="margin: 0 0 0.25rem;"></h2>
+      <p id="runMeta" style="margin: 0; color: #71767b; font-size: 0.8rem;"></p>
+      <p id="runStatus" style="margin: 0.5rem 0 0;"></p>
+    </div>
+    <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Four steps</h3>
+    <div class="steps-row" id="stepsRow"></div>
+    <p id="runningNote" style="margin-top: 1rem; color: #71767b; font-size: 0.875rem; display: none;">Running in background — status and logs refresh every 2s.</p>
+    <h3 style="margin-top: 1.5rem; margin-bottom: 0.5rem; font-size: 1rem;">Logs</h3>
+    <div class="log-box" id="logsBox"><p style="color: #71767b; margin: 0; font-size: 0.875rem;">No logs yet.</p></div>
+  </div>
+
+  <script>
+    var API = '<%= request.getContextPath() %>/api';
+    var runId = new URLSearchParams(window.location.search).get('runId');
+    if (!runId) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('notFound').style.display = 'block';
+    } else {
+      function statusClass(s) {
+        if (s === 'Success') return 'status-success';
+        if (s === 'Failed') return 'status-failed';
+        if (s === 'Running') return 'status-running';
+        return 'status-pending';
+      }
+      function stepName(n) {
+        return n === 1 ? 'Data Pull' : n === 2 ? 'Extract (SP)' : n === 3 ? 'Transform (SP)' : 'Migrate (SP)';
+      }
+      function renderStep(step, isRunning) {
+        var duration = (step.StartedAt && step.FinishedAt) ? ((new Date(step.FinishedAt) - new Date(step.StartedAt)) / 1000).toFixed(1) + 's' : '';
+        var cls = 'step-block' + (step.Status === 'Failed' ? ' failed' : isRunning ? ' running' : '');
+        var rows = '';
+        if (isRunning && step.RowsProcessed != null && step.RowsTotal != null) {
+          rows = '<div style="color:#71767b;font-size:0.8rem">' + Number(step.RowsProcessed).toLocaleString() + ' / ' + Number(step.RowsTotal).toLocaleString() + ' done</div>';
+        } else if (isRunning && step.RowsProcessed != null) {
+          rows = '<div style="color:#71767b;font-size:0.8rem">' + Number(step.RowsProcessed).toLocaleString() + ' done</div>';
+        } else if (step.RowsAffected != null) {
+          rows = '<div style="color:#71767b;font-size:0.8rem">' + step.RowsAffected + ' rows</div>';
+        }
+        var err = step.ErrorMessage ? '<div style="margin-top:0.5rem;font-size:0.75rem;color:#f4212e">' + step.ErrorMessage + '</div>' : '';
+        return '<div class="' + cls + '"><div style="font-weight:600;margin-bottom:0.25rem">' + step.StepNumber + ' — ' + (step.StepName || stepName(step.StepNumber)) + '</div><div class="' + statusClass(step.Status) + '" style="font-size:0.875rem">' + (step.Status || 'Pending') + '</div>' + rows + (duration ? '<div style="color:#71767b;font-size:0.8rem">' + duration + '</div>' : '') + err + '</div>';
+      }
+      function renderRun(run) {
+        document.getElementById('runTitle').textContent = run.PipelineName || 'Pipeline';
+        document.getElementById('runMeta').innerHTML = (run.RunNumber != null ? '<span style="font-weight:600;margin-right:0.5rem">#' + run.RunNumber + '</span>' : '') + '<span class="mono">' + run.RunId + '</span>';
+        var started = run.StartedAt ? new Date(run.StartedAt).toLocaleString() : '—';
+        document.getElementById('runStatus').innerHTML = 'Status: <span class="' + statusClass(run.Status) + '">' + run.Status + '</span> · Started: ' + started;
+        var steps = run.steps || [];
+        var ordered = [1,2,3,4].map(function(n) { return steps.find(function(s) { return s.StepNumber === n; }); }).filter(Boolean);
+        if (ordered.length === 0) ordered = [1,2,3,4].map(function(n) { return { StepNumber: n, StepName: stepName(n), Status: 'Pending' }; });
+        document.getElementById('stepsRow').innerHTML = ordered.map(function(s) { return renderStep(s, s.Status === 'Running'); }).join('');
+      }
+      function renderLogs(logs) {
+        var box = document.getElementById('logsBox');
+        if (!logs || logs.length === 0) { box.innerHTML = '<p style="color:#71767b;margin:0;font-size:0.875rem">No logs yet.</p>'; return; }
+        function lc(l) { return l === 'Error' ? 'log-level-error' : l === 'Warning' ? 'log-level-warning' : 'log-level-info'; }
+        box.innerHTML = logs.map(function(l) {
+          return '<div class="log-line"><span class="log-time">' + new Date(l.LogAt).toLocaleTimeString() + '</span><span class="' + lc(l.Level) + '">' + (l.Level || 'Info') + '</span>' + (l.StepNumber != null ? '<span style="color:#1d9bf0">Step' + l.StepNumber + '</span>' : '') + '<span style="color:#e7e9ea">' + (l.Message || '') + '</span></div>';
+        }).join('');
+      }
+      var tick;
+      function refresh() {
+        fetch(API + '/runs/' + encodeURIComponent(runId)).then(function(r) { return r.ok ? r.json() : null; }).then(function(run) {
+          document.getElementById('loading').style.display = 'none';
+          if (!run) { document.getElementById('notFound').style.display = 'block'; return null; }
+          document.getElementById('content').style.display = 'block';
+          renderRun(run);
+          if (run.Status === 'Running') {
+            if (!tick) tick = setInterval(refresh, 1500);
+          } else if (tick) {
+            clearInterval(tick);
+            tick = null;
+          }
+          return fetch(API + '/runs/' + encodeURIComponent(runId) + '/logs').then(function(r) { return r.ok ? r.json() : []; });
+        }).then(function(data) {
+          if (data != null) renderLogs(Array.isArray(data) ? data : []);
+        });
+      }
+      refresh();
+    }
+  </script>
+</body>
+</html>

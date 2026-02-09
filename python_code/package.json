@@ -1,0 +1,14 @@
+{
+  "name": "automated-data-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sample project: 4-step data pipeline (Data Pull, Extract, Transform, Migrate) + Web GUI",
+  "scripts": {
+    "init-db": "cd orchestrator && npm run init-db",
+    "pipeline": "cd orchestrator && npm run pipeline",
+    "api": "cd api && npm start",
+    "web": "cd web && npm run dev",
+    "scraper": "cd scraper && npm start",
+    "install:all": "cd orchestrator && npm install && cd ../api && npm install && cd ../web && npm install && cd ../scraper && npm install"
+  }
+}

@@ -1,0 +1,5 @@
+[
+  { "OrderId": "ORD-101", "CustomerId": "C201", "Amount": 120.00, "OrderDate": "2025-02-01" },
+  { "OrderId": "ORD-102", "CustomerId": "C202", "Amount": 35.50, "OrderDate": "2025-02-02" },
+  { "OrderId": "ORD-103", "CustomerId": "C203", "Amount": 275.00, "OrderDate": "2025-02-03" }
+]
