@@ -114,6 +114,8 @@ ensure_maven() {
 ensure_java
 ensure_maven
 
+echo "Running mvn clean..."
+mvn clean -q
 echo "Starting pipeline at http://localhost:8080/"
 echo "Press Ctrl+C to stop."
 exec mvn jetty:run

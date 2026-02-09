@@ -117,17 +117,39 @@ public class Database {
         initSchema(null, null, null, null);
     }
 
+    /** Load schema SQL from classpath with fallbacks for Windows/different classloaders. */
+    private static String loadSchemaSql() {
+        String[] names = { "/sqlserver_schema.sql", "sqlserver_schema.sql" };
+        for (String name : names) {
+            InputStream in = null;
+            if (name.startsWith("/")) {
+                in = Database.class.getResourceAsStream(name);
+            } else {
+                ClassLoader cl = Thread.currentThread().getContextClassLoader();
+                if (cl != null) in = cl.getResourceAsStream(name);
+                if (in == null && Database.class.getClassLoader() != null) {
+                    in = Database.class.getClassLoader().getResourceAsStream(name);
+                }
+            }
+            if (in != null) {
+                try {
+                    try (Scanner s = new Scanner(in, StandardCharsets.UTF_8).useDelimiter("\\A")) {
+                        return s.hasNext() ? s.next() : "";
+                    }
+                } catch (Exception e) {
+                    // fall through to next name
+                } finally {
+                    try { if (in != null) in.close(); } catch (IOException ignored) {}
+                }
+            }
+        }
+        return null;
+    }
+
     /** Init schema on DB identified by optional overrides (null = use env/default). */
     public static void initSchema(String hostOverride, Integer portOverride, String userOverride, String passwordOverride) throws SQLException {
-        String sql;
-        try (InputStream in = Database.class.getResourceAsStream("/sqlserver_schema.sql")) {
-            if (in == null) throw new SQLException("sqlserver_schema.sql not found");
-            try (Scanner s = new Scanner(in, StandardCharsets.UTF_8).useDelimiter("\\A")) {
-                sql = s.hasNext() ? s.next() : "";
-            }
-        } catch (IOException e) {
-            throw new SQLException("Failed to read schema", e);
-        }
+        String sql = loadSchemaSql();
+        if (sql == null) throw new SQLException("sqlserver_schema.sql not found on classpath (tried /sqlserver_schema.sql and sqlserver_schema.sql)");
 
         Connection c = (hostOverride != null || portOverride != null || userOverride != null || passwordOverride != null)
             ? getConnection(hostOverride, portOverride, userOverride, passwordOverride)

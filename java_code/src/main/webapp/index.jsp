@@ -14,6 +14,7 @@
       <a href="${pageContext.request.contextPath}/manual-run.jsp">Manual Run</a>
       <a href="${pageContext.request.contextPath}/schedules.jsp">Schedules</a>
       <a href="${pageContext.request.contextPath}/logs.jsp">All logs</a>
+      <a href="${pageContext.request.contextPath}/admin.jsp">Admin</a>
     </nav>
     <p>Automated Data Pipeline — 4 steps: Data Pull, Extract, Transform, Migrate</p>
   </header>
@@ -25,6 +26,7 @@
       <option value="Running">Running</option>
       <option value="Success">Success</option>
       <option value="Failed">Failed</option>
+      <option value="Failed-TimeOut-6Hours">Failed (timeout 6h)</option>
     </select>
   </div>
 
@@ -51,6 +53,7 @@
       if (s === 'Success') return 'status-success';
       if (s === 'Failed') return 'status-failed';
       if (s === 'Running') return 'status-running';
+      if (s === 'Cancelled' || s === 'Failed-TimeOut-6Hours') return 'status-failed';
       return 'status-pending';
     }
     function loadRuns() {

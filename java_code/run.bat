@@ -23,6 +23,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo Running mvn clean...
+call mvn clean -q
 echo Starting pipeline at http://localhost:8080/
 echo Press Ctrl+C to stop.
 call mvn jetty:run

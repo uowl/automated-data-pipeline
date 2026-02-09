@@ -23,13 +23,15 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Serves JSON API: GET /api/runs, GET /api/runs/{id}, GET /api/runs/{id}/logs, GET /api/logs, POST /api/pipeline/trigger
+ * Serves JSON API: GET /api/runs, GET /api/runs/{id}, GET /api/runs/{id}/logs, GET /api/logs, POST /api/pipeline/upload, POST /api/pipeline/trigger
  */
 public class ApiServlet extends HttpServlet {
 
@@ -71,6 +73,10 @@ public class ApiServlet extends HttpServlet {
                     return;
                 }
             }
+            if ("/admin/check-running-status".equals(path)) {
+                checkRunningStatus(resp);
+                return;
+            }
             resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
             resp.getWriter().write("{\"error\":\"Not found\"}");
         } catch (SQLException e) {
@@ -85,6 +91,15 @@ public class ApiServlet extends HttpServlet {
         resp.setContentType("application/json");
         resp.setCharacterEncoding("UTF-8");
 
+        if ("/pipeline/upload".equals(path)) {
+            try {
+                uploadFile(req, resp);
+            } catch (Exception e) {
+                resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                resp.getWriter().write("{\"error\":\"" + escapeJson(e.getMessage()) + "\"}");
+            }
+            return;
+        }
         if ("/pipeline/trigger".equals(path)) {
             try {
                 triggerPipeline(req, resp);
@@ -102,6 +117,27 @@ public class ApiServlet extends HttpServlet {
                 resp.getWriter().write("{\"error\":\"" + escapeJson(e.getMessage()) + "\"}");
             }
             return;
+        }
+        if ("/admin/check-running-status".equals(path)) {
+            try {
+                checkRunningStatus(resp);
+            } catch (SQLException e) {
+                resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                resp.getWriter().write("{\"error\":\"" + escapeJson(e.getMessage()) + "\"}");
+            }
+            return;
+        }
+        if (path != null && path.startsWith("/runs/") && path.endsWith("/cancel")) {
+            String runId = path.substring("/runs/".length(), path.length() - "/cancel".length());
+            if (!runId.isEmpty()) {
+                try {
+                    cancelRun(runId, resp);
+                } catch (SQLException e) {
+                    resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                    resp.getWriter().write("{\"error\":\"" + escapeJson(e.getMessage()) + "\"}");
+                }
+                return;
+            }
         }
         resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
         resp.getWriter().write("{\"error\":\"Not found\"}");
@@ -244,6 +280,53 @@ public class ApiServlet extends HttpServlet {
         resp.getWriter().write("{\"scheduleId\":\"" + scheduleId + "\"}");
     }
 
+    /** POST /api/pipeline/upload: multipart file, save to landing, return { "path": absolutePath }. */
+    private void uploadFile(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+        if (!ServletFileUpload.isMultipartContent(req)) {
+            resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            resp.getWriter().write("{\"error\":\"Multipart form with file required\"}");
+            return;
+        }
+        DiskFileItemFactory factory = new DiskFileItemFactory();
+        File tempDir = (File) getServletContext().getAttribute("javax.servlet.context.tempdir");
+        if (tempDir != null) factory.setRepository(tempDir);
+        ServletFileUpload upload = new ServletFileUpload(factory);
+        upload.setSizeMax(100 * 1024 * 1024); // 100 MB
+        List<FileItem> items = upload.parseRequest(req);
+        File savedFile = null;
+        for (FileItem item : items) {
+            if (item.isFormField()) continue;
+            if (!"file".equals(item.getFieldName())) continue;
+            String name = item.getName();
+            if (name == null || name.isEmpty()) continue;
+            String ext = name.contains(".") ? name.substring(name.lastIndexOf('.')).toLowerCase() : ".csv";
+            if (!".csv".equals(ext) && !".json".equals(ext)) {
+                resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+                resp.getWriter().write("{\"error\":\"Only CSV or JSON files are allowed\"}");
+                return;
+            }
+            File landingDir = new File(Database.getLandingDir());
+            landingDir.mkdirs();
+            savedFile = new File(landingDir, "upload_" + System.currentTimeMillis() + ext);
+            try (InputStream in = item.getInputStream();
+                 OutputStream out = Files.newOutputStream(savedFile.toPath())) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            }
+            break;
+        }
+        if (savedFile == null || !savedFile.exists()) {
+            resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            resp.getWriter().write("{\"error\":\"No file uploaded. Use form field \\\"file\\\".\"}");
+            return;
+        }
+        Map<String, Object> body = new HashMap<>();
+        body.put("path", savedFile.getAbsolutePath());
+        resp.setStatus(HttpServletResponse.SC_CREATED);
+        resp.getWriter().write(GSON.toJson(body));
+    }
+
     private static Integer parseIntSafe(String s) {
         try {
             return Integer.parseInt(s);
@@ -296,6 +379,59 @@ public class ApiServlet extends HttpServlet {
         return pi == null ? "" : pi;
     }
 
+    private static final String STATUS_TIMEOUT_6H = "Failed-TimeOut-6Hours";
+    private static final int RUN_TIMEOUT_HOURS = 6;
+
+    /** If run is Running and StartedAt is older than 6 hours, mark as Failed-TimeOut-6Hours and update the map. */
+    private void markRunTimedOutIfNeeded(Connection c, Map<String, Object> run) throws SQLException {
+        if (!"Running".equals(run.get("Status"))) return;
+        Object startedObj = run.get("StartedAt");
+        if (startedObj == null) return;
+        try {
+            Instant started = Instant.parse(startedObj.toString());
+            if (Instant.now().isBefore(started.plus(RUN_TIMEOUT_HOURS, ChronoUnit.HOURS))) return;
+        } catch (Exception ignored) {
+            return;
+        }
+        String runId = (String) run.get("RunId");
+        if (runId == null) return;
+        String now = Instant.now().toString();
+        try (PreparedStatement ps = c.prepareStatement("UPDATE dbo.PipelineRuns SET Status = ?, FinishedAt = ? WHERE RunId = ? AND Status = 'Running'")) {
+            ps.setString(1, STATUS_TIMEOUT_6H);
+            ps.setString(2, now);
+            ps.setString(3, runId);
+            ps.executeUpdate();
+        }
+        c.commit();
+        run.put("Status", STATUS_TIMEOUT_6H);
+        run.put("FinishedAt", now);
+    }
+
+    /** Admin: check all runs with Status=Running and mark as Failed-TimeOut-6Hours if started > 6 hours ago. */
+    private void checkRunningStatus(HttpServletResponse resp) throws SQLException, IOException {
+        Database.initSchema();
+        List<String> runIdsMarked = new ArrayList<>();
+        try (Connection c = Database.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                 "SELECT RunId, RunNumber, PipelineName, ADFRunId, StartedAt, FinishedAt, Status, CreatedAt FROM dbo.PipelineRuns WHERE Status = 'Running'")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                List<Map<String, Object>> rows = resultSetToMaps(rs);
+                for (Map<String, Object> run : rows) {
+                    String runId = (String) run.get("RunId");
+                    markRunTimedOutIfNeeded(c, run);
+                    if (STATUS_TIMEOUT_6H.equals(run.get("Status")) && runId != null) {
+                        runIdsMarked.add(runId);
+                    }
+                }
+            }
+        }
+        Map<String, Object> body = new HashMap<>();
+        body.put("runningChecked", true);
+        body.put("markedTimeout", runIdsMarked.size());
+        body.put("runIdsMarked", runIdsMarked);
+        resp.getWriter().write(GSON.toJson(body));
+    }
+
     private void listRuns(HttpServletRequest req, HttpServletResponse resp) throws SQLException, IOException {
         String pipeline = req.getParameter("pipeline");
         String status = req.getParameter("status");
@@ -318,13 +454,30 @@ public class ApiServlet extends HttpServlet {
             for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
             try (ResultSet rs = ps.executeQuery()) {
                 List<Map<String, Object>> rows = resultSetToMaps(rs);
+                for (Map<String, Object> run : rows) {
+                    markRunTimedOutIfNeeded(c, run);
+                }
                 resp.getWriter().write(GSON.toJson(rows));
             }
         }
     }
 
     private void runDetail(String runId, HttpServletResponse resp) throws SQLException, IOException {
-        Database.initSchema();
+        try {
+            runDetailQuery(runId, resp, false);
+        } catch (SQLException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.contains("Invalid object name") || msg.contains("does not exist") || msg.contains("no such table")) {
+                Database.initSchema();
+                runDetailQuery(runId, resp, true);
+            } else {
+                throw e;
+            }
+        }
+    }
+
+    /** Run the run-detail query. Call with initSchemaAlreadyRun=true when retrying after initSchema. */
+    private void runDetailQuery(String runId, HttpServletResponse resp, boolean initSchemaAlreadyRun) throws SQLException, IOException {
         try (Connection c = Database.getConnection()) {
             Map<String, Object> run;
             try (PreparedStatement ps = c.prepareStatement(
@@ -339,6 +492,7 @@ public class ApiServlet extends HttpServlet {
                     run = rowToMap(rs);
                 }
             }
+            markRunTimedOutIfNeeded(c, run);
             List<Map<String, Object>> steps = new ArrayList<>();
             try (PreparedStatement ps = c.prepareStatement(
                 "SELECT StepRunId, RunId, StepNumber, StepName, StartedAt, FinishedAt, Status, RowsAffected, RowsProcessed, RowsTotal, ErrorMessage, CreatedAt FROM dbo.StepRuns WHERE RunId = ? ORDER BY StepNumber")) {
@@ -350,6 +504,38 @@ public class ApiServlet extends HttpServlet {
             run.put("steps", steps);
             resp.getWriter().write(GSON.toJson(run));
         }
+    }
+
+    private void cancelRun(String runId, HttpServletResponse resp) throws SQLException, IOException {
+        Database.initSchema();
+        try (Connection c = Database.getConnection()) {
+            String status = null;
+            try (PreparedStatement ps = c.prepareStatement("SELECT Status FROM dbo.PipelineRuns WHERE RunId = ?")) {
+                ps.setString(1, runId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
+                        resp.getWriter().write("{\"error\":\"Run not found\"}");
+                        return;
+                    }
+                    status = rs.getString("Status");
+                }
+            }
+            if (!"Running".equals(status)) {
+                resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+                resp.getWriter().write("{\"error\":\"Run is not running (status: " + (status != null ? status : "unknown") + ")\"}");
+                return;
+            }
+            PipelineRunner.cancelRun(runId);
+            try (PreparedStatement ps = c.prepareStatement("UPDATE dbo.PipelineRuns SET Status = ?, FinishedAt = ? WHERE RunId = ? AND Status = 'Running'")) {
+                ps.setString(1, "Cancelled");
+                ps.setString(2, java.time.Instant.now().toString());
+                ps.setString(3, runId);
+                ps.executeUpdate();
+            }
+            c.commit();
+        }
+        resp.getWriter().write("{\"ok\":true,\"message\":\"Cancellation requested\"}");
     }
 
     private void runLogs(String runId, HttpServletResponse resp) throws SQLException, IOException {
@@ -418,49 +604,43 @@ public class ApiServlet extends HttpServlet {
         ServletFileUpload upload = new ServletFileUpload(factory);
         upload.setSizeMax(100 * 1024 * 1024); // 100 MB
         List<FileItem> items = upload.parseRequest(req);
-        File savedFile = null;
+        String serverFilePath = null;
         String dbHost = null;
         Integer dbPort = null;
         String dbUser = null;
         String dbPassword = null;
         for (FileItem item : items) {
-            if (item.isFormField()) {
-                String fn = item.getFieldName();
-                String val = item.getString();
-                if (val != null) val = val.trim();
-                if ("dbHost".equals(fn) && val != null && !val.isEmpty()) dbHost = val;
-                else if ("dbPort".equals(fn) && val != null && !val.isEmpty()) {
-                    try { dbPort = Integer.parseInt(val); } catch (NumberFormatException ignored) {}
-                }
-                else if ("dbUser".equals(fn) && val != null && !val.isEmpty()) dbUser = val;
-                else if ("dbPassword".equals(fn)) dbPassword = val != null ? val : "";
-                continue;
+            if (!item.isFormField()) continue;
+            String fn = item.getFieldName();
+            String val = item.getString();
+            if (val != null) val = val.trim();
+            if ("filePath".equals(fn) && val != null && !val.isEmpty()) serverFilePath = val;
+            else if ("dbHost".equals(fn) && val != null && !val.isEmpty()) dbHost = val;
+            else if ("dbPort".equals(fn) && val != null && !val.isEmpty()) {
+                try { dbPort = Integer.parseInt(val); } catch (NumberFormatException ignored) {}
             }
-            if (!"file".equals(item.getFieldName())) continue;
-            String name = item.getName();
-            if (name == null || name.isEmpty()) continue;
-            String ext = name.contains(".") ? name.substring(name.lastIndexOf('.')).toLowerCase() : ".csv";
-            if (!".csv".equals(ext) && !".json".equals(ext)) {
-                resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-                resp.getWriter().write("{\"error\":\"Only CSV or JSON files are allowed\"}");
-                return;
-            }
-            File landingDir = new File(Database.getLandingDir());
-            landingDir.mkdirs();
-            savedFile = new File(landingDir, "upload_" + System.currentTimeMillis() + ext);
-            try (InputStream in = item.getInputStream();
-                 OutputStream out = Files.newOutputStream(savedFile.toPath())) {
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
-            }
-            break;
+            else if ("dbUser".equals(fn) && val != null && !val.isEmpty()) dbUser = val;
+            else if ("dbPassword".equals(fn)) dbPassword = val != null ? val : "";
         }
-        if (savedFile == null || !savedFile.exists()) {
+        if (serverFilePath == null || serverFilePath.isEmpty()) {
             resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-            resp.getWriter().write("{\"error\":\"No file uploaded. Use form field \\\"file\\\" with a CSV or JSON file.\"}");
+            resp.getWriter().write("{\"error\":\"File path on server is required.\"}");
             return;
         }
+        File serverFile = new File(serverFilePath);
+        if (!serverFile.exists() || !serverFile.isFile()) {
+            resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            resp.getWriter().write("{\"error\":\"File not found on server: " + escapeJson(serverFilePath) + "\"}");
+            return;
+        }
+        String name = serverFile.getName();
+        String ext = name.contains(".") ? name.substring(name.lastIndexOf('.')).toLowerCase() : "";
+        if (!".csv".equals(ext) && !".json".equals(ext)) {
+            resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            resp.getWriter().write("{\"error\":\"Server file must be .csv or .json\"}");
+            return;
+        }
+        String pathToUse = serverFile.getAbsolutePath();
         // Use overrides only when host, port, or user is explicitly provided
         boolean useOverrides = (dbHost != null && !dbHost.isEmpty()) || dbPort != null || (dbUser != null && !dbUser.isEmpty());
         if (!useOverrides) {
@@ -469,12 +649,14 @@ public class ApiServlet extends HttpServlet {
             dbUser = null;
             dbPassword = null;
         }
-        String runId = PipelineRunner.startPipelineRun(savedFile.getAbsolutePath(), dbHost, dbPort, dbUser, dbPassword);
+        // Ensure schema/tables exist so run + steps can be inserted (run is visible immediately on run-detail)
+        Database.initSchema(dbHost, dbPort, dbUser, dbPassword);
+        String runId = PipelineRunner.startPipelineRun(pathToUse, dbHost, dbPort, dbUser, dbPassword);
         resp.setStatus(HttpServletResponse.SC_CREATED);
         Map<String, Object> body = new HashMap<>();
         body.put("runId", runId);
         body.put("message", "Pipeline started in background");
-        body.put("file", savedFile.getName());
+        body.put("file", new File(pathToUse).getName());
         resp.getWriter().write(GSON.toJson(body));
     }
 

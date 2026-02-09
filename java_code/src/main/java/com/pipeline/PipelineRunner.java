@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -35,6 +36,18 @@ public class PipelineRunner {
         int run(Connection c, String runId, String csvPath, int stepNumber) throws Exception;
     }
 
+    private static final ConcurrentHashMap<String, Boolean> CANCELLED_RUNS = new ConcurrentHashMap<>();
+
+    /** Request cancellation of a running pipeline. Idempotent. */
+    public static void cancelRun(String runId) {
+        if (runId != null && !runId.isEmpty()) CANCELLED_RUNS.put(runId, Boolean.TRUE);
+    }
+
+    /** True if this run has been requested to cancel. */
+    public static boolean isCancelled(String runId) {
+        return runId != null && CANCELLED_RUNS.containsKey(runId);
+    }
+
     private static final StepRunner[] STEPS = new StepRunner[] {
         PullStep::run,
         (c, runId, csvPath, stepNum) -> ExtractStep.run(c, runId, stepNum),
@@ -49,7 +62,6 @@ public class PipelineRunner {
 
     /** Same as startPipelineRun(csvPath) but with optional DB connection overrides. */
     public static String startPipelineRun(String csvPath, String dbHost, Integer dbPort, String dbUser, String dbPassword) throws SQLException {
-        Database.initSchema(dbHost, dbPort, dbUser, dbPassword);
         Connection c = (dbHost != null || dbPort != null || dbUser != null || dbPassword != null)
             ? Database.getConnection(dbHost, dbPort, dbUser, dbPassword)
             : Database.getConnection();
@@ -95,8 +107,9 @@ public class PipelineRunner {
             BACKGROUND.submit(() -> {
                 try {
                     executePipelineSteps(runIdFinal, pathFinal, h, p, u, pw);
-                } catch (Exception e) {
+                } catch (Throwable e) {
                     e.printStackTrace();
+                    logRunErrorAndMarkFailed(runIdFinal, e.getMessage(), e.toString(), h, p, u, pw);
                 }
             });
             return runId;
@@ -111,27 +124,67 @@ public class PipelineRunner {
 
     public static void executePipelineSteps(String runId, String csvPath, String dbHost, Integer dbPort, String dbUser, String dbPassword) {
         StepProgress.setDbParams(dbHost, dbPort, dbUser, dbPassword);
-        Connection conn = null;
         try {
-            conn = (dbHost != null || dbPort != null || dbUser != null || dbPassword != null)
+            if (isCancelled(runId)) return;
+            Connection conn = (dbHost != null || dbPort != null || dbUser != null || dbPassword != null)
                 ? Database.getConnection(dbHost, dbPort, dbUser, dbPassword)
                 : Database.getConnection();
-            boolean wasAutoCommit = conn.getAutoCommit();
-            conn.setAutoCommit(false);
             try {
-                runPipeline(conn, runId, csvPath);
-            } finally {
                 try {
-                    conn.setAutoCommit(wasAutoCommit);
-                } catch (SQLException ignored) {}
+                    Database.initSchema(dbHost, dbPort, dbUser, dbPassword);
+                } catch (SQLException e) {
+                    logRunErrorAndMarkFailed(runId, e.getMessage(), e.toString(), dbHost, dbPort, dbUser, dbPassword);
+                    return;
+                }
+                boolean wasAutoCommit = conn.getAutoCommit();
+                conn.setAutoCommit(false);
+                // Step 0: run is initialized and visible; log so UI has an immediate entry
+                PipelineLogger.log(conn, runId, "Info", "Step 0: Run initialized", PIPELINE_NAME, 0, "Initialization", null);
+                conn.commit();
+                try {
+                    runPipeline(conn, runId, csvPath);
+                } finally {
+                    try {
+                        conn.setAutoCommit(wasAutoCommit);
+                    } catch (SQLException ignored) {}
+                }
+            } finally {
+                conn.close();
             }
         } catch (SQLException e) {
             e.printStackTrace();
+            logRunErrorAndMarkFailed(runId, e.getMessage(), e.toString(), dbHost, dbPort, dbUser, dbPassword);
         } finally {
+            CANCELLED_RUNS.remove(runId);
             StepProgress.clearDbParams();
-            if (conn != null) {
-                try { conn.close(); } catch (SQLException ignored) {}
+        }
+    }
+
+    /** Write error to run logs and set run status to Failed. Uses best-effort connection (same DB params, then default). */
+    private static void logRunErrorAndMarkFailed(String runId, String message, String details,
+                                                 String dbHost, Integer dbPort, String dbUser, String dbPassword) {
+        if (runId == null) return;
+        Connection c = null;
+        try {
+            c = (dbHost != null || dbPort != null || dbUser != null || dbPassword != null)
+                ? Database.getConnection(dbHost, dbPort, dbUser, dbPassword)
+                : Database.getConnection();
+        } catch (SQLException ignored) {
+            try {
+                c = Database.getConnection();
+            } catch (SQLException ignored2) {
+                return;
             }
+        }
+        try {
+            c.setAutoCommit(false);
+            PipelineLogger.log(c, runId, "Error", message != null ? message : "Pipeline failed", PIPELINE_NAME, null, null, details);
+            markRunFinished(c, runId, "Failed");
+        } catch (SQLException ignored) {
+        } finally {
+            try {
+                if (c != null) c.close();
+            } catch (SQLException ignored) {}
         }
     }
 
@@ -149,9 +202,16 @@ public class PipelineRunner {
         try {
             int lastRows = 0;
             for (int i = 0; i < 4; i++) {
+                if (isCancelled(runId)) {
+                    PipelineLogger.log(c, runId, "Info", "Pipeline cancelled by user", PIPELINE_NAME, null, null, null);
+                    markFirstRunningStepFailed(c, runId, steps, "Cancelled");
+                    markRunFinished(c, runId, "Cancelled");
+                    return;
+                }
                 StepRow step = steps.get(i);
                 updateStepRunning(c, step.stepRunId);
                 PipelineLogger.log(c, runId, "Info", "Step " + (i + 1) + " started", PIPELINE_NAME, i + 1, STEP_NAMES[i], null);
+                c.commit(); // commit so UI and logs show step as "Running" / "In Progress" immediately
 
                 int rows = STEPS[i].run(c, runId, csvPath, i + 1);
                 lastRows = rows;

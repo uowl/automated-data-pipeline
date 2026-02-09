@@ -14,6 +14,7 @@
       <a href="${pageContext.request.contextPath}/manual-run.jsp">Manual Run</a>
       <a href="${pageContext.request.contextPath}/schedules.jsp">Schedules</a>
       <a href="${pageContext.request.contextPath}/logs.jsp">All logs</a>
+      <a href="${pageContext.request.contextPath}/admin.jsp">Admin</a>
     </nav>
     <p>Automated Data Pipeline — 4 steps: Data Pull, Extract, Transform, Migrate</p>
   </header>

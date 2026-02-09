@@ -131,6 +131,8 @@ function Ensure-Maven {
 Ensure-Java
 Ensure-Maven
 
+Write-Host "Running mvn clean..."
+& mvn clean -q
 Write-Host "Starting pipeline at http://localhost:8080/"
 Write-Host "Press Ctrl+C to stop."
 & mvn jetty:run
